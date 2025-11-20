@@ -1,0 +1,17 @@
+{
+  "name": "discord-monitor-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "Discord monitor bot for limited mentions",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js-selfbot-v13": "^2.15.0",
+    "axios": "^1.6.0",
+    "@google/generative-ai": "^0.11.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
