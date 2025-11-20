@@ -72,7 +72,7 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 const client = new Client({ checkUpdate: false });
 const processedMessages = new Set();
 
-// NEW: track users we've already *checked* once
+// track users we've already *checked* once
 const checkedUsers = new Set();
 
 let itemsCache = null;
@@ -80,6 +80,7 @@ let lastItemsFetch = 0;
 let acronymIndex = null;
 let nameIndex = null;
 
+// this now stores a bunch of *variants* (username, tag, etc.)
 const verifiedUsers = new Set();
 
 // ------------- HELPERS -------------
@@ -174,16 +175,38 @@ function getDiscordFromEmbed(embed) {
   return null;
 }
 
+// add multiple variants of a discord name to the verified set
+function addVerifiedNameVariants(discordName) {
+  if (!discordName) return;
+  let base = discordName.trim().toLowerCase();
+  if (!base) return;
+
+  // remove trailing punctuation/spaces
+  const stripped = base.replace(/[.,;:!\s]+$/g, '');
+
+  const variants = new Set();
+  variants.add(base);
+  variants.add(stripped);
+
+  // if it looks like "name#1234", also store "name"
+  if (base.includes('#')) {
+    variants.add(base.split('#')[0]);
+  }
+
+  for (const v of variants) {
+    if (v && !verifiedUsers.has(v)) {
+      verifiedUsers.add(v);
+    }
+  }
+}
+
 function addVerifiedFromMessage(message) {
   if (!message.embeds || !message.embeds.length) return;
   for (const embed of message.embeds) {
     const discordName = getDiscordFromEmbed(embed);
     if (discordName) {
-      const key = discordName.toLowerCase();
-      if (!verifiedUsers.has(key)) {
-        verifiedUsers.add(key);
-        console.log(`[Verified] Added ${discordName}`);
-      }
+      addVerifiedNameVariants(discordName);
+      console.log(`[Verified] Added ** ${discordName}`);
     }
   }
 }
@@ -214,7 +237,7 @@ async function loadVerifiedUsers(maxMessages = 1000) {
     }
 
     console.log(
-      `[Verified] Loaded ${verifiedUsers.size} users from verification channel (scanned ${Math.min(
+      `[Verified] Loaded ${verifiedUsers.size} keys from verification channel (scanned ${Math.min(
         maxMessages,
         fetched
       )} messages)`
@@ -324,6 +347,25 @@ client.on('messageCreate', async (message) => {
     if (!MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
     if (message.author.bot) return;
     if (!message.content || !message.content.trim()) return;
+
+    // ---------- SKIP IF USER IS VERIFIED (fast, early) ----------
+    const possibleKeys = [
+      message.author.username?.toLowerCase(),
+      message.author.tag?.toLowerCase(),
+      message.member?.displayName?.toLowerCase()
+    ].filter(Boolean);
+
+    const isVerifiedUser = possibleKeys.some((k) => verifiedUsers.has(k));
+
+    if (isVerifiedUser) {
+      console.log(
+        `[Skip] ${message.author.tag} already logged in verification channel (matched one of: ${possibleKeys.join(
+          ', '
+        )})`
+      );
+      return;
+    }
+
     if (!message.guild) return;
 
     // ROLE FILTER
@@ -350,22 +392,13 @@ client.on('messageCreate', async (message) => {
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
 
-    // NEW: don't check more than one message per user
+    // don't check more than one message per user
     if (checkedUsers.has(message.author.id)) {
       return;
     }
     checkedUsers.add(message.author.id);
 
     const userMsg = message.content.trim();
-    const authorNameKey = message.author.username.toLowerCase();
-
-    // skip users already logged in verification channel
-    if (verifiedUsers.has(authorNameKey)) {
-      console.log(
-        `[Skip] ${message.author.tag} already logged in verification channel`
-      );
-      return;
-    }
 
     console.log(`[Monitor] New message from ${message.author.tag}: ${userMsg}`);
 
@@ -458,7 +491,7 @@ Message: ${userMsg}
     const rap = details[2];
     const value = details[3];
 
-    // -------- STEP 2.5: enforce value threshold (>100k only) --------
+    // value threshold (>100k only)
     const numericValue = Number(value) || 0;
     if (numericValue <= MIN_ITEM_VALUE) {
       console.log(
@@ -467,7 +500,7 @@ Message: ${userMsg}
       return;
     }
 
-    // ---------- STEP 3: make sure item is clearly mentioned ----------
+    // make sure item is clearly mentioned
     if (!messageSupportsItem(userMsg, details)) {
       console.log(
         `[Skip] Item "${name}" not clearly mentioned in message: "${userMsg}"`
@@ -479,11 +512,16 @@ Message: ${userMsg}
       `[Rolimons] Match: ${name} (${acronym}) | Value: ${numericValue} | RAP: ${rap}`
     );
 
-    // ---------- STEP 3.5: wait 10 seconds, then re-check verification ----------
-    await sleep(10000); // 10s delay
+    // wait 10 seconds, then re-check verification status
+    await sleep(10000);
 
-    const currentNameKey = message.author.username.toLowerCase();
-    if (verifiedUsers.has(currentNameKey)) {
+    const newKeys = [
+      message.author.username?.toLowerCase(),
+      message.author.tag?.toLowerCase(),
+      message.member?.displayName?.toLowerCase()
+    ].filter(Boolean);
+
+    if (newKeys.some((k) => verifiedUsers.has(k))) {
       console.log(
         `[DelaySkip] ${message.author.tag} became verified during delay; not logging.`
       );
