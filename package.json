@@ -2,9 +2,9 @@
   "name": "discord-monitor-bot",
   "version": "1.0.0",
   "description": "Discord bot for monitoring Roblox limited mentions",
-  "main": "determiner.js",
+  "main": "src/determiner.js",
   "scripts": {
-    "start": "node determiner.js"
+    "start": "node src/determiner.js"
   },
   "dependencies": {
     "discord.js-selfbot-v13": "^2.15.0",
