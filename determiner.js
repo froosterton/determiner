@@ -303,6 +303,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// build "jump to message" link
+function buildJumpLink(message) {
+  const guildId = message.guild ? message.guild.id : '@me';
+  return `https://discord.com/channels/${guildId}/${message.channel.id}/${message.id}`;
+}
+
 // ------------- DISCORD EVENTS -------------
 
 client.on('ready', async () => {
@@ -328,6 +334,7 @@ client.on('messageCreate', async (message) => {
 
     const userMsg = message.content.trim();
     const authorNameKey = message.author.username.toLowerCase();
+    const jumpLink = buildJumpLink(message);
 
     // EARLY EXIT: if this Discord name is already seen in verification channel,
     // don't even *start* processing
@@ -497,7 +504,8 @@ Message: ${userMsg}
       title: 'High Value Item Mentioned',
       description:
         `**Message:** ${userMsg}\n` +
-        `**Discord:** ${message.author.tag}\n\n` +
+        `**Discord:** ${message.author.tag}\n` +
+        `**Jump:** ${jumpLink}\n\n` +
         `**Item:** ${name}${acronym ? ` (${acronym})` : ''}\n` +
         `**Value:** ${formatValue(numericValue)}`,
       color: 0x00a2ff,
@@ -513,6 +521,8 @@ Message: ${userMsg}
     console.error('[Monitor] Error processing message:', err);
 
     try {
+      const jumpLink = buildJumpLink(message);
+
       await axios.post(WEBHOOK_URL, {
         embeds: [
           {
@@ -522,6 +532,7 @@ Message: ${userMsg}
               `**Discord:** ${
                 message.author ? message.author.tag : 'Unknown'
               }\n` +
+              `**Jump:** ${jumpLink}\n` +
               `**Error:** ${err.message}`,
             color: 0xff0000,
             timestamp: new Date().toISOString()
