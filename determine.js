@@ -4,20 +4,24 @@ const axios = require('axios');
 
 // ----------------- CONFIG -----------------
 
-// MUST be set in Railway environment
 const TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-// Hard-coded IDs are fine
-const MONITOR_CHANNEL_ID = '442709792839172099';      // watch messages here
-const VERIFIED_CHANNEL_ID = '1403167119071248548';    // embeds with "Discord: <name>"
+// channels to WATCH for people talking about items
+const MONITOR_CHANNEL_IDS = [
+  '430203025659789343',
+  '442709792839172099',
+  '442709710408515605'
+];
+
+// channel whose embeds contain "Discord: <name>" (verified/logged users)
+const VERIFIED_CHANNEL_ID = '1403167119071248548';
 
 // Rolimons API
 const ROLIMONS_API = 'https://api.rolimons.com/items/v2/itemdetails';
 
-// Role filter: user must have at least one role AND
-// every role they have (other than @everyone) must be in this list.
+// Role filter
 const ALLOWED_ROLES = [
   'Verified',
   'Nitro Booster',
@@ -42,7 +46,6 @@ const ALLOWED_ROLES = [
   'Projection Pings'
 ];
 
-// Fail fast if required env vars are missing
 if (!TOKEN) {
   console.error('DISCORD_TOKEN is not set');
   process.exit(1);
@@ -66,13 +69,11 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 const client = new Client({ checkUpdate: false });
 const processedMessages = new Set();
 
-// Rolimons cache + indexes
 let itemsCache = null;
 let lastItemsFetch = 0;
-let acronymIndex = null; // normAcronym -> { id, details }
-let nameIndex = null;    // normName -> { id, details }
+let acronymIndex = null;
+let nameIndex = null;
 
-// Verified users set from embeds in VERIFIED_CHANNEL_ID
 const verifiedUsers = new Set();
 
 // ------------- HELPERS -------------
@@ -120,22 +121,16 @@ async function getRolimonsData() {
   return { items: itemsCache, acronymIndex, nameIndex };
 }
 
-// shorten 480000 -> "480K"
 function formatValue(value) {
   if (typeof value !== 'number') {
     value = Number(value);
     if (Number.isNaN(value)) return String(value);
   }
-  if (value >= 1_000_000) {
-    return `${Math.round(value / 100000) / 10}M`;
-  }
-  if (value >= 1000) {
-    return `${Math.round(value / 1000)}K`;
-  }
+  if (value >= 1_000_000) return `${Math.round(value / 100000) / 10}M`;
+  if (value >= 1000) return `${Math.round(value / 1000)}K`;
   return String(value);
 }
 
-// Roblox thumbnails API for item image
 async function getItemThumbnail(itemId) {
   try {
     const res = await axios.get('https://thumbnails.roblox.com/v1/assets', {
@@ -152,12 +147,11 @@ async function getItemThumbnail(itemId) {
       return data.data[0].imageUrl;
     }
   } catch (err) {
-    console.error('[Thumbnail] Error fetching thumbnail:', err.message);
+    console.error('[Thumbnail] Error:', err.message);
   }
   return null;
 }
 
-// Extract "Discord: <name>" from an embed
 function getDiscordFromEmbed(embed) {
   if (embed.description) {
     const m = embed.description.match(/Discord:\s*([^\n\r]+)/i);
@@ -174,7 +168,6 @@ function getDiscordFromEmbed(embed) {
   return null;
 }
 
-// From a message in VERIFIED_CHANNEL_ID, add any Discord names found
 function addVerifiedFromMessage(message) {
   if (!message.embeds || !message.embeds.length) return;
   for (const embed of message.embeds) {
@@ -189,8 +182,8 @@ function addVerifiedFromMessage(message) {
   }
 }
 
-// Load recent verified users on startup (last 100 msgs for now)
-async function loadVerifiedUsers() {
+// load up to 1000 messages from verification channel before monitoring
+async function loadVerifiedUsers(maxMessages = 1000) {
   try {
     const channel = await client.channels.fetch(VERIFIED_CHANNEL_ID);
     if (!channel) {
@@ -198,22 +191,36 @@ async function loadVerifiedUsers() {
       return;
     }
 
-    const messages = await channel.messages.fetch({ limit: 100 });
-    messages.forEach((msg) => addVerifiedFromMessage(msg));
+    let fetched = 0;
+    let lastId;
+
+    while (fetched < maxMessages) {
+      const limit = Math.min(100, maxMessages - fetched);
+      const options = { limit };
+      if (lastId) options.before = lastId;
+
+      const batch = await channel.messages.fetch(options);
+      if (batch.size === 0) break;
+
+      batch.forEach((msg) => addVerifiedFromMessage(msg));
+      fetched += batch.size;
+      lastId = batch.last().id;
+    }
 
     console.log(
-      `[Verified] Loaded ${verifiedUsers.size} users from verification channel`
+      `[Verified] Loaded ${verifiedUsers.size} users from verification channel (scanned ${Math.min(
+        maxMessages,
+        fetched
+      )} messages)`
     );
   } catch (err) {
     console.error('Error loading verified users:', err);
   }
 }
 
-// Direct lookup by tokens using Rolimons acronyms/names
 function directTokenLookup(text, acronymIndex, nameIndex) {
   const tokens = tokenize(text).map((t) => normalize(t));
 
-  // exact acronym first
   for (const token of tokens) {
     if (!token) continue;
     const hit = acronymIndex.get(token);
@@ -227,7 +234,6 @@ function directTokenLookup(text, acronymIndex, nameIndex) {
   return null;
 }
 
-// Fuzzy search when we have a guessed string from Gemini
 function fuzzyFindByQuery(items, query) {
   const normQuery = normalize(query);
   if (!normQuery) return null;
@@ -265,7 +271,6 @@ function fuzzyFindByQuery(items, query) {
   return bestMatch;
 }
 
-// Check that the resolved item is actually supported by words in the original message
 function messageSupportsItem(message, details) {
   const msgTokens = tokenize(message);
   const msgTokensNorm = msgTokens.map((t) => t.toLowerCase());
@@ -274,24 +279,16 @@ function messageSupportsItem(message, details) {
   const acronym = (details[1] || '').toLowerCase();
   const nameTokens = tokenize(name);
 
-  // 1) Message contains the exact acronym token (bv, stv, skotn, pic, etc.)
-  if (acronym && msgTokensNorm.includes(acronym)) {
-    return true;
-  }
+  if (acronym && msgTokensNorm.includes(acronym)) return true;
 
-  // 2) Message shares a word or strong prefix with any name token
   for (const nTok of nameTokens) {
     for (const mTok of msgTokensNorm) {
       if (nTok === mTok) return true;
-
       if (mTok.length >= 3) {
-        if (nTok.startsWith(mTok) || mTok.startsWith(nTok)) {
-          return true;
-        }
+        if (nTok.startsWith(mTok) || mTok.startsWith(nTok)) return true;
       }
     }
   }
-
   return false;
 }
 
@@ -299,25 +296,22 @@ function messageSupportsItem(message, details) {
 
 client.on('ready', async () => {
   console.log(`[Monitor] Logged in as ${client.user.tag}`);
-  console.log(`[Monitor] Watching channel: ${MONITOR_CHANNEL_ID}`);
+  console.log(`[Monitor] Watching channels: ${MONITOR_CHANNEL_IDS.join(', ')}`);
   console.log(`[Monitor] Checking embeds in: ${VERIFIED_CHANNEL_ID}`);
-  await loadVerifiedUsers();
+  await loadVerifiedUsers(1000);
 });
 
 client.on('messageCreate', async (message) => {
   try {
-    // 1) Any new embed in verification channel updates verifiedUsers
     if (message.channel.id === VERIFIED_CHANNEL_ID) {
       addVerifiedFromMessage(message);
       return;
     }
 
-    // 2) Only process messages in monitor channel for item talk
-    if (message.channel.id !== MONITOR_CHANNEL_ID) return;
+    if (!MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
     if (message.author.bot) return;
     if (!message.content || !message.content.trim()) return;
 
-    // --- ROLE FILTER ---
     if (!message.guild) return;
 
     let member = message.member;
@@ -338,7 +332,6 @@ client.on('messageCreate', async (message) => {
       userRoleNames.every((roleName) => ALLOWED_ROLES.includes(roleName));
 
     if (!onlyAllowedRoles) return;
-    // --- end role filter ---
 
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
@@ -346,7 +339,6 @@ client.on('messageCreate', async (message) => {
     const userMsg = message.content.trim();
     const authorNameKey = message.author.username.toLowerCase();
 
-    // If this Discord name already appears in verified channel, skip
     if (verifiedUsers.has(authorNameKey)) {
       console.log(
         `[Skip] ${message.author.tag} already logged in verification channel`
