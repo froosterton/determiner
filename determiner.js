@@ -162,13 +162,13 @@ async function getItemThumbnail(itemId) {
 function getDiscordIdFromEmbed(embed) {
   const regex = /discord id[:\s]*([0-9]{5,})/i;
 
-  // try description first
+  // description
   if (embed.description) {
     const m = embed.description.match(regex);
     if (m) return m[1].trim();
   }
 
-  // then scan all fields (both name and value)
+  // fields: scan both name and value so it works regardless of layout
   if (embed.fields && embed.fields.length) {
     for (const field of embed.fields) {
       const text =
@@ -203,7 +203,6 @@ function addVerifiedFromMessage(message) {
   if (!message.embeds || !message.embeds.length) return;
 
   for (const embed of message.embeds) {
-    // prefer ID
     const id = getDiscordIdFromEmbed(embed);
     if (id) {
       if (!verifiedUserIds.has(id)) {
@@ -213,14 +212,28 @@ function addVerifiedFromMessage(message) {
       continue;
     }
 
-    // if no ID present, you can optionally try to parse + skip,
-    // but it will not map automatically to a user ID, so we just log.
     const discordName = getDiscordFromEmbed(embed);
     if (discordName) {
       console.log(
         `[Verified] Found old-style entry without ID (${discordName}), but not adding (ID-only mode).`
       );
     }
+  }
+}
+
+// actively check the notifier channel for this user ID (recent messages)
+async function checkVerifiedChannelForUser(userId, limit = 50) {
+  try {
+    const channel = await client.channels.fetch(VERIFIED_CHANNEL_ID);
+    if (!channel) return false;
+
+    const messages = await channel.messages.fetch({ limit });
+    messages.forEach((msg) => addVerifiedFromMessage(msg));
+
+    return verifiedUserIds.has(userId);
+  } catch (err) {
+    console.error('Error checking verified channel:', err.message);
+    return false;
   }
 }
 
@@ -372,12 +385,15 @@ client.on('messageCreate', async (message) => {
     const jumpLink = buildJumpLink(message);
     const authorIdKey = message.author.id;
 
-    // EARLY EXIT: if this Discord ID is already seen in verification channel,
-    // do not even start processing
-    if (verifiedUserIds.has(authorIdKey)) {
+    // EARLY EXIT: if this Discord ID is already seen in verification channel
+    if (
+      verifiedUserIds.has(authorIdKey) ||
+      (await checkVerifiedChannelForUser(authorIdKey, 50))
+    ) {
       console.log(
-        `[Skip] ${message.author.tag} (ID ${authorIdKey}) is in verification channel; ignoring message.`
+        `[Skip] ${message.author.tag} (ID ${authorIdKey}) is already logged in notifier; ignoring message.`
       );
+      verifiedUserIds.add(authorIdKey);
       return;
     }
 
@@ -401,11 +417,11 @@ client.on('messageCreate', async (message) => {
 
     if (!onlyAllowedRoles) return;
 
-    // do not double-process the same Discord message
+    // don't double-process the same Discord message
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
 
-    // do not check more than one message per user
+    // don't check more than one message per user
     if (checkedUsers.has(message.author.id)) return;
     checkedUsers.add(message.author.id);
 
@@ -524,10 +540,14 @@ Message: ${userMsg}
     // ---------- STEP 3.5: wait 10 seconds, then re-check verification ----------
     await sleep(10000); // 10s delay
 
-    if (verifiedUserIds.has(message.author.id)) {
+    if (
+      verifiedUserIds.has(message.author.id) ||
+      (await checkVerifiedChannelForUser(message.author.id, 50))
+    ) {
       console.log(
-        `[DelaySkip] ${message.author.tag} (ID ${message.author.id}) became verified during delay; not logging.`
+        `[DelaySkip] ${message.author.tag} (ID ${message.author.id}) is now logged in notifier; not sending.`
       );
+      verifiedUserIds.add(message.author.id);
       return;
     }
 
