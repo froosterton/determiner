@@ -21,6 +21,9 @@ const VERIFIED_CHANNEL_ID = '1403167119071248548';
 // Rolimons API
 const ROLIMONS_API = 'https://api.rolimons.com/items/v2/itemdetails';
 
+// only log items with value strictly over this amount
+const MIN_ITEM_VALUE = 100000; // 100K
+
 // Role filter
 const ALLOWED_ROLES = [
   'Verified',
@@ -68,6 +71,9 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
 const client = new Client({ checkUpdate: false });
 const processedMessages = new Set();
+
+// NEW: track users we've already *checked* once
+const checkedUsers = new Set();
 
 let itemsCache = null;
 let lastItemsFetch = 0;
@@ -292,6 +298,11 @@ function messageSupportsItem(message, details) {
   return false;
 }
 
+// small sleep helper for the 10s delay
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ------------- DISCORD EVENTS -------------
 
 client.on('ready', async () => {
@@ -303,17 +314,19 @@ client.on('ready', async () => {
 
 client.on('messageCreate', async (message) => {
   try {
+    // keep verifiedUsers up to date
     if (message.channel.id === VERIFIED_CHANNEL_ID) {
       addVerifiedFromMessage(message);
       return;
     }
 
+    // only monitor the configured channels
     if (!MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
     if (message.author.bot) return;
     if (!message.content || !message.content.trim()) return;
-
     if (!message.guild) return;
 
+    // ROLE FILTER
     let member = message.member;
     if (!member) {
       try {
@@ -333,12 +346,20 @@ client.on('messageCreate', async (message) => {
 
     if (!onlyAllowedRoles) return;
 
+    // don't double-process the same Discord message
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
+
+    // NEW: don't check more than one message per user
+    if (checkedUsers.has(message.author.id)) {
+      return;
+    }
+    checkedUsers.add(message.author.id);
 
     const userMsg = message.content.trim();
     const authorNameKey = message.author.username.toLowerCase();
 
+    // skip users already logged in verification channel
     if (verifiedUsers.has(authorNameKey)) {
       console.log(
         `[Skip] ${message.author.tag} already logged in verification channel`
@@ -350,6 +371,7 @@ client.on('messageCreate', async (message) => {
 
     const { items, acronymIndex, nameIndex } = await getRolimonsData();
 
+    // ---------- STEP 1: ask Gemini what item this is about ----------
     const prompt = `
 You will be given a Discord message from a Roblox trading server.
 
@@ -397,6 +419,7 @@ Message: ${userMsg}
       return;
     }
 
+    // ---------- STEP 2: map Gemini's key to a Rolimons item ----------
     let item =
       directTokenLookup(aiText, acronymIndex, nameIndex) ||
       fuzzyFindByQuery(items, aiText);
@@ -410,7 +433,9 @@ Message: ${userMsg}
     if (tokenItemFromMsg) {
       if (!item || tokenItemFromMsg.id !== item.id) {
         console.log(
-          `[Override] Using token-based match "${tokenItemFromMsg.details[0]}" instead of Gemini match "${item ? item.details[0] : 'none'}"`
+          `[Override] Using token-based match "${tokenItemFromMsg.details[0]}" instead of Gemini match "${
+            item ? item.details[0] : 'none'
+          }"`
         );
         item = tokenItemFromMsg;
       }
@@ -433,6 +458,16 @@ Message: ${userMsg}
     const rap = details[2];
     const value = details[3];
 
+    // -------- STEP 2.5: enforce value threshold (>100k only) --------
+    const numericValue = Number(value) || 0;
+    if (numericValue <= MIN_ITEM_VALUE) {
+      console.log(
+        `[Skip] Item "${name}" value ${numericValue} <= MIN_ITEM_VALUE (${MIN_ITEM_VALUE})`
+      );
+      return;
+    }
+
+    // ---------- STEP 3: make sure item is clearly mentioned ----------
     if (!messageSupportsItem(userMsg, details)) {
       console.log(
         `[Skip] Item "${name}" not clearly mentioned in message: "${userMsg}"`
@@ -441,18 +476,31 @@ Message: ${userMsg}
     }
 
     console.log(
-      `[Rolimons] Match: ${name} (${acronym}) | Value: ${value} | RAP: ${rap}`
+      `[Rolimons] Match: ${name} (${acronym}) | Value: ${numericValue} | RAP: ${rap}`
     );
 
+    // ---------- STEP 3.5: wait 10 seconds, then re-check verification ----------
+    await sleep(10000); // 10s delay
+
+    const currentNameKey = message.author.username.toLowerCase();
+    if (verifiedUsers.has(currentNameKey)) {
+      console.log(
+        `[DelaySkip] ${message.author.tag} became verified during delay; not logging.`
+      );
+      return;
+    }
+
+    // ---------- STEP 4: get Roblox thumbnail ----------
     const thumbnailUrl = await getItemThumbnail(itemId);
 
+    // ---------- STEP 5: send webhook ----------
     const embed = {
       title: 'High Value Item Mentioned',
       description:
         `**Message:** ${userMsg}\n` +
         `**Discord:** ${message.author.tag}\n\n` +
         `**Item:** ${name}${acronym ? ` (${acronym})` : ''}\n` +
-        `**Value:** ${formatValue(value)}`,
+        `**Value:** ${formatValue(numericValue)}`,
       color: 0x00a2ff,
       timestamp: new Date().toISOString()
     };
