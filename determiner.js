@@ -160,21 +160,25 @@ async function getItemThumbnail(itemId) {
 
 // pull Discord ID from embed (preferred)
 function getDiscordIdFromEmbed(embed) {
+  const regex = /discord id[:\s]*([0-9]{5,})/i;
+
   // try description first
   if (embed.description) {
-    const m = embed.description.match(/Discord ID:\s*([0-9]+)/i);
+    const m = embed.description.match(regex);
     if (m) return m[1].trim();
   }
-  // then any fields named like "Discord ID"
+
+  // then scan all fields (both name and value)
   if (embed.fields && embed.fields.length) {
     for (const field of embed.fields) {
-      if (!field.name) continue;
-      if (field.name.toLowerCase().includes('discord id') && field.value) {
-        const idMatch = field.value.match(/([0-9]+)/);
-        if (idMatch) return idMatch[1];
-      }
+      const text =
+        (field.name ? String(field.name) + '\n' : '') +
+        (field.value ? String(field.value) : '');
+      const m = text.match(regex);
+      if (m) return m[1].trim();
     }
   }
+
   return null;
 }
 
@@ -210,7 +214,7 @@ function addVerifiedFromMessage(message) {
     }
 
     // if no ID present, you can optionally try to parse + skip,
-    // but it won't map automatically to a user ID, so we just log.
+    // but it will not map automatically to a user ID, so we just log.
     const discordName = getDiscordFromEmbed(embed);
     if (discordName) {
       console.log(
@@ -369,7 +373,7 @@ client.on('messageCreate', async (message) => {
     const authorIdKey = message.author.id;
 
     // EARLY EXIT: if this Discord ID is already seen in verification channel,
-    // don't even *start* processing
+    // do not even start processing
     if (verifiedUserIds.has(authorIdKey)) {
       console.log(
         `[Skip] ${message.author.tag} (ID ${authorIdKey}) is in verification channel; ignoring message.`
@@ -397,11 +401,11 @@ client.on('messageCreate', async (message) => {
 
     if (!onlyAllowedRoles) return;
 
-    // don't double-process the same Discord message
+    // do not double-process the same Discord message
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
 
-    // don't check more than one message per user
+    // do not check more than one message per user
     if (checkedUsers.has(message.author.id)) return;
     checkedUsers.add(message.author.id);
 
