@@ -15,7 +15,7 @@ const MONITOR_CHANNEL_IDS = [
   '442709710408515605'
 ];
 
-// channel whose embeds contain "Discord: <name>" (verified/logged users)
+// channel whose embeds contain Discord info for verified/logged users
 const VERIFIED_CHANNEL_ID = '1403167119071248548';
 
 // Rolimons API
@@ -79,8 +79,8 @@ let lastItemsFetch = 0;
 let acronymIndex = null;
 let nameIndex = null;
 
-// Discord names we saw in VERIFIED_CHANNEL_ID
-const verifiedUsers = new Set();
+// Discord user IDs we saw in VERIFIED_CHANNEL_ID
+const verifiedUserIds = new Set();
 
 // ------------- HELPERS -------------
 
@@ -158,6 +158,27 @@ async function getItemThumbnail(itemId) {
   return null;
 }
 
+// pull Discord ID from embed (preferred)
+function getDiscordIdFromEmbed(embed) {
+  // try description first
+  if (embed.description) {
+    const m = embed.description.match(/Discord ID:\s*([0-9]+)/i);
+    if (m) return m[1].trim();
+  }
+  // then any fields named like "Discord ID"
+  if (embed.fields && embed.fields.length) {
+    for (const field of embed.fields) {
+      if (!field.name) continue;
+      if (field.name.toLowerCase().includes('discord id') && field.value) {
+        const idMatch = field.value.match(/([0-9]+)/);
+        if (idMatch) return idMatch[1];
+      }
+    }
+  }
+  return null;
+}
+
+// (backwards-compat only if you still have old entries with just "Discord:")
 function getDiscordFromEmbed(embed) {
   if (embed.description) {
     const m = embed.description.match(/Discord:\s*([^\n\r]+)/i);
@@ -176,14 +197,25 @@ function getDiscordFromEmbed(embed) {
 
 function addVerifiedFromMessage(message) {
   if (!message.embeds || !message.embeds.length) return;
+
   for (const embed of message.embeds) {
+    // prefer ID
+    const id = getDiscordIdFromEmbed(embed);
+    if (id) {
+      if (!verifiedUserIds.has(id)) {
+        verifiedUserIds.add(id);
+        console.log(`[Verified] Added ID ${id} from embed.`);
+      }
+      continue;
+    }
+
+    // if no ID present, you can optionally try to parse + skip,
+    // but it won't map automatically to a user ID, so we just log.
     const discordName = getDiscordFromEmbed(embed);
     if (discordName) {
-      const key = discordName.toLowerCase();
-      if (!verifiedUsers.has(key)) {
-        verifiedUsers.add(key);
-        console.log(`[Verified] Added ** ${discordName} **`);
-      }
+      console.log(
+        `[Verified] Found old-style entry without ID (${discordName}), but not adding (ID-only mode).`
+      );
     }
   }
 }
@@ -214,7 +246,7 @@ async function loadVerifiedUsers(maxMessages = 1000) {
     }
 
     console.log(
-      `[Verified] Loaded ${verifiedUsers.size} users from verification channel (scanned ${Math.min(
+      `[Verified] Loaded ${verifiedUserIds.size} user IDs from verification channel (scanned ${Math.min(
         maxMessages,
         fetched
       )} messages)`
@@ -320,7 +352,7 @@ client.on('ready', async () => {
 
 client.on('messageCreate', async (message) => {
   try {
-    // keep verifiedUsers up to date
+    // keep verifiedUserIds up to date
     if (message.channel.id === VERIFIED_CHANNEL_ID) {
       addVerifiedFromMessage(message);
       return;
@@ -333,14 +365,14 @@ client.on('messageCreate', async (message) => {
     if (!message.guild) return;
 
     const userMsg = message.content.trim();
-    const authorNameKey = message.author.username.toLowerCase();
     const jumpLink = buildJumpLink(message);
+    const authorIdKey = message.author.id;
 
-    // EARLY EXIT: if this Discord name is already seen in verification channel,
+    // EARLY EXIT: if this Discord ID is already seen in verification channel,
     // don't even *start* processing
-    if (verifiedUsers.has(authorNameKey)) {
+    if (verifiedUserIds.has(authorIdKey)) {
       console.log(
-        `[Skip] ${message.author.tag} is in verification channel; ignoring message.`
+        `[Skip] ${message.author.tag} (ID ${authorIdKey}) is in verification channel; ignoring message.`
       );
       return;
     }
@@ -488,10 +520,9 @@ Message: ${userMsg}
     // ---------- STEP 3.5: wait 10 seconds, then re-check verification ----------
     await sleep(10000); // 10s delay
 
-    const currentNameKey = message.author.username.toLowerCase();
-    if (verifiedUsers.has(currentNameKey)) {
+    if (verifiedUserIds.has(message.author.id)) {
       console.log(
-        `[DelaySkip] ${message.author.tag} became verified during delay; not logging.`
+        `[DelaySkip] ${message.author.tag} (ID ${message.author.id}) became verified during delay; not logging.`
       );
       return;
     }
@@ -505,6 +536,7 @@ Message: ${userMsg}
       description:
         `**Message:** ${userMsg}\n` +
         `**Discord:** ${message.author.tag}\n` +
+        `**Discord ID:** ${message.author.id}\n` +
         `**Jump:** ${jumpLink}\n\n` +
         `**Item:** ${name}${acronym ? ` (${acronym})` : ''}\n` +
         `**Value:** ${formatValue(numericValue)}`,
@@ -531,6 +563,9 @@ Message: ${userMsg}
               `**Message:** ${message.content}\n` +
               `**Discord:** ${
                 message.author ? message.author.tag : 'Unknown'
+              }\n` +
+              `**Discord ID:** ${
+                message.author ? message.author.id : 'Unknown'
               }\n` +
               `**Jump:** ${jumpLink}\n` +
               `**Error:** ${err.message}`,
