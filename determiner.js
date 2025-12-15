@@ -1,6 +1,6 @@
-const { Client } = require('discord.js-selfbot-v13');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const axios = require('axios');
+const { Client } = require("discord.js-selfbot-v13");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const axios = require("axios");
 
 // ----------------- CONFIG -----------------
 
@@ -8,88 +8,99 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-// channels to WATCH for people talking about items
 const MONITOR_CHANNEL_IDS = [
-  '430203025659789343',
-  '442709792839172099',
-  '442709710408515605'
+  "430203025659789343",
+  "442709792839172099",
+  "442709710408515605",
 ];
 
-// channel whose embeds contain Discord info for verified/logged users
-const VERIFIED_CHANNEL_ID = '1403167119071248548';
+const VERIFIED_CHANNEL_ID = "1403167119071248548";
 
-// Rolimons API
-const ROLIMONS_API = 'https://api.rolimons.com/items/v2/itemdetails';
+const ROLIMONS_API = "https://api.rolimons.com/items/v2/itemdetails";
 
-// only log items with value strictly over this amount
 const MIN_ITEM_VALUE = 100000; // 100K
 
-// Role filter
 const ALLOWED_ROLES = [
-  'Verified',
-  'Nitro Booster',
-  '200k Members',
-  'Game Night',
-  'Weeb',
-  'Art Talk',
-  'Music',
-  'Pets',
+  "Verified",
+  "Nitro Booster",
+  "200k Members",
+  "Game Night",
+  "Weeb",
+  "Art Talk",
+  "Music",
+  "Pets",
   "Rolimon's News Pings",
-  'Content Pings',
-  'Roblox News Pings',
-  'Trading News Pings',
-  'Limited Pings',
-  'UGC Limited Pings',
-  '-Free UGC Limited Pings',
-  'Free UGC Limited Game Pings',
-  'Upcoming UGC Limiteds Ping',
-  'Free UGC Event Pings',
-  'Poll Pings',
-  'Value Change Pings',
-  'Projection Pings'
+  "Content Pings",
+  "Roblox News Pings",
+  "Trading News Pings",
+  "Limited Pings",
+  "UGC Limited Pings",
+  "-Free UGC Limited Pings",
+  "Free UGC Limited Game Pings",
+  "Upcoming UGC Limiteds Ping",
+  "Free UGC Event Pings",
+  "Poll Pings",
+  "Value Change Pings",
+  "Projection Pings",
 ];
 
 if (!TOKEN) {
-  console.error('DISCORD_TOKEN is not set');
+  console.error("DISCORD_TOKEN is not set");
   process.exit(1);
 }
 if (!GEMINI_API_KEY) {
-  console.error('GEMINI_API_KEY is not set');
+  console.error("GEMINI_API_KEY is not set");
   process.exit(1);
 }
 if (!WEBHOOK_URL) {
-  console.error('WEBHOOK_URL is not set');
+  console.error("WEBHOOK_URL is not set");
   process.exit(1);
 }
 
 // ----------------- GEMINI SETUP -----------------
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 // ----------------- DISCORD CLIENT -----------------
 
 const client = new Client({ checkUpdate: false });
+
 const processedMessages = new Set();
-// track users we've already *checked* once
+// track users we've already *checked* once (per runtime)
 const checkedUsers = new Set();
+
+// ---- VERIFIED CACHE (like your 2nd script) ----
+const cachedVerifiedKeys = new Set(); // stores Discord IDs primarily
+let verifiedCacheReady = false;
+
+// ----------------- ROLIMONS CACHE -----------------
 
 let itemsCache = null;
 let lastItemsFetch = 0;
-let acronymIndex = null;
-let nameIndex = null;
 
-// Discord user IDs we saw in VERIFIED_CHANNEL_ID
-const verifiedUserIds = new Set();
+// indexes store ARRAYS, not single entries
+let acronymIndex = null; // Map<string, Array<{id, details}>>
+let nameIndex = null; // Map<string, Array<{id, details}>>
 
-// ------------- HELPERS -------------
+// ----------------- HELPERS -----------------
 
 function normalize(str) {
-  return str.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return String(str || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function tokenize(str) {
-  return str.toLowerCase().match(/[a-z0-9]+/g) || [];
+  return String(str || "").toLowerCase().match(/[a-z0-9]+/g) || [];
+}
+
+function addToIndex(map, key, value) {
+  if (!key) return;
+  const arr = map.get(key);
+  if (!arr) map.set(key, [value]);
+  else arr.push(value);
 }
 
 function buildIndexes(items) {
@@ -97,14 +108,17 @@ function buildIndexes(items) {
   nameIndex = new Map();
 
   for (const [id, details] of Object.entries(items)) {
-    const name = details[0] || '';
-    const acronym = details[1] || '';
+    const name = details[0] || "";
+    const acronym = details[1] || "";
 
     const normName = normalize(name);
-    const normAcronym = normalize(acronym);
+    const normAcr = normalize(acronym);
 
-    if (normName) nameIndex.set(normName, { id, details });
-    if (normAcronym) acronymIndex.set(normAcronym, { id, details });
+    const entry = { id, details };
+
+    // multiple items can share same acronym/name key → store arrays
+    if (normAcr) addToIndex(acronymIndex, normAcr, entry);
+    if (normName) addToIndex(nameIndex, normName, entry);
   }
 }
 
@@ -117,7 +131,7 @@ async function getRolimonsData() {
 
   const res = await axios.get(ROLIMONS_API);
   if (!res.data || !res.data.items) {
-    throw new Error('Invalid Rolimons API response');
+    throw new Error("Invalid Rolimons API response");
   }
 
   itemsCache = res.data.items;
@@ -128,52 +142,56 @@ async function getRolimonsData() {
 }
 
 function formatValue(value) {
-  if (typeof value !== 'number') {
-    value = Number(value);
-    if (Number.isNaN(value)) return String(value);
-  }
-  if (value >= 1_000_000) return `${Math.round(value / 100000) / 10}M`;
-  if (value >= 1000) return `${Math.round(value / 1000)}K`;
-  return String(value);
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (n >= 1_000_000) return `${Math.round(n / 100000) / 10}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}K`;
+  return String(n);
 }
 
 async function getItemThumbnail(itemId) {
   try {
-    const res = await axios.get('https://thumbnails.roblox.com/v1/assets', {
+    const res = await axios.get("https://thumbnails.roblox.com/v1/assets", {
       params: {
         assetIds: itemId,
-        size: '420x420',
-        format: 'Png',
-        isCircular: false
-      }
+        size: "420x420",
+        format: "Png",
+        isCircular: false,
+      },
     });
 
     const data = res.data;
-    if (data && data.data && data.data[0] && data.data[0].imageUrl) {
-      return data.data[0].imageUrl;
-    }
+    if (data?.data?.[0]?.imageUrl) return data.data[0].imageUrl;
   } catch (err) {
-    console.error('[Thumbnail] Error:', err.message);
+    console.error("[Thumbnail] Error:", err.message);
   }
   return null;
 }
 
-// pull Discord ID from embed (preferred)
-function getDiscordIdFromEmbed(embed) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildJumpLink(message) {
+  const guildId = message.guild ? message.guild.id : "@me";
+  return `https://discord.com/channels/${guildId}/${message.channel.id}/${message.id}`;
+}
+
+// ----------------- VERIFIED CACHE HELPERS -----------------
+
+function extractDiscordIdFromEmbed(embed) {
   const regex = /discord id[:\s]*([0-9]{5,})/i;
 
-  // description
   if (embed.description) {
     const m = embed.description.match(regex);
     if (m) return m[1].trim();
   }
 
-  // fields: scan both name and value so it works regardless of layout
-  if (embed.fields && embed.fields.length) {
+  if (embed.fields?.length) {
     for (const field of embed.fields) {
       const text =
-        (field.name ? String(field.name) + '\n' : '') +
-        (field.value ? String(field.value) : '');
+        (field.name ? String(field.name) + "\n" : "") +
+        (field.value ? String(field.value) : "");
       const m = text.match(regex);
       if (m) return m[1].trim();
     }
@@ -182,233 +200,268 @@ function getDiscordIdFromEmbed(embed) {
   return null;
 }
 
-// (backwards-compat only if you still have old entries with just "Discord:")
-function getDiscordFromEmbed(embed) {
-  if (embed.description) {
-    const m = embed.description.match(/Discord:\s*([^\n\r]+)/i);
-    if (m) return m[1].trim();
+// Optional fallback for old-style embeds that only store "Discord: name"
+function extractDiscordTagFromEmbed(embed) {
+  // fields
+  if (embed.fields?.length) {
+    for (const f of embed.fields) {
+      const nm = String(f.name || "").replace(/\*\*/g, "").trim().toLowerCase();
+      if (nm.includes("discord")) {
+        const v = String(f.value || "").trim();
+        return v || null;
+      }
+    }
   }
-  if (embed.fields && embed.fields.length) {
-    for (const field of embed.fields) {
-      if (!field.name) continue;
-      if (field.name.toLowerCase().includes('discord') && field.value) {
-        return field.value.trim();
+  // description lines
+  if (embed.description) {
+    const lines = embed.description.split("\n");
+    for (let line of lines) {
+      line = line.replace(/\*\*/g, "").trim();
+      if (line.toLowerCase().startsWith("discord:")) {
+        return line.split(":").slice(1).join(":").trim() || null;
       }
     }
   }
   return null;
 }
 
-function addVerifiedFromMessage(message) {
-  if (!message.embeds || !message.embeds.length) return;
+function addVerifiedFromMessage(msg) {
+  if (!msg.embeds?.length) return;
 
-  for (const embed of message.embeds) {
-    const id = getDiscordIdFromEmbed(embed);
+  for (const embed of msg.embeds) {
+    const id = extractDiscordIdFromEmbed(embed);
     if (id) {
-      if (!verifiedUserIds.has(id)) {
-        verifiedUserIds.add(id);
-        console.log(`[Verified] Added ID ${id} from embed.`);
-      }
+      cachedVerifiedKeys.add(id); // ID-only mode (best)
       continue;
     }
 
-    const discordName = getDiscordFromEmbed(embed);
-    if (discordName) {
-      console.log(
-        `[Verified] Found old-style entry without ID (${discordName}), but not adding (ID-only mode).`
-      );
-    }
+    // OPTIONAL: if you want old-style "Discord:" entries to also dedupe
+    // uncomment next 2 lines:
+    // const tag = extractDiscordTagFromEmbed(embed);
+    // if (tag) cachedVerifiedKeys.add(tag.toLowerCase());
   }
 }
 
-// actively check the notifier channel for this user ID (recent messages)
-async function checkVerifiedChannelForUser(userId, limit = 50) {
-  try {
-    const channel = await client.channels.fetch(VERIFIED_CHANNEL_ID);
-    if (!channel) return false;
+async function loadVerifiedCache(maxMessages = Infinity) {
+  const channel =
+    client.channels.cache.get(VERIFIED_CHANNEL_ID) ||
+    (await client.channels.fetch(VERIFIED_CHANNEL_ID).catch(() => null));
 
-    const messages = await channel.messages.fetch({ limit });
-    messages.forEach((msg) => addVerifiedFromMessage(msg));
-
-    return verifiedUserIds.has(userId);
-  } catch (err) {
-    console.error('Error checking verified channel:', err.message);
-    return false;
+  if (!channel) {
+    console.log("Could not fetch verified channel.");
+    return;
   }
-}
 
-// load up to 1000 messages from verification channel before monitoring
-async function loadVerifiedUsers(maxMessages = 1000) {
+  console.log("[VerifiedCache] Loading ALL messages into cache...");
+
   try {
-    const channel = await client.channels.fetch(VERIFIED_CHANNEL_ID);
-    if (!channel) {
-      console.log('Could not fetch verified channel');
-      return;
-    }
-
+    let lastId = null;
     let fetched = 0;
-    let lastId;
+    let batch = 0;
 
-    while (fetched < maxMessages) {
-      const limit = Math.min(100, maxMessages - fetched);
-      const options = { limit };
+    while (true) {
+      const options = { limit: 100 };
       if (lastId) options.before = lastId;
 
-      const batch = await channel.messages.fetch(options);
-      if (batch.size === 0) break;
+      const messages = await channel.messages.fetch(options);
+      batch++;
 
-      batch.forEach((msg) => addVerifiedFromMessage(msg));
-      fetched += batch.size;
-      lastId = batch.last().id;
+      if (messages.size === 0) break;
+
+      messages.forEach((m) => addVerifiedFromMessage(m));
+
+      fetched += messages.size;
+      if (fetched >= maxMessages) break;
+
+      const newLastId = messages.last()?.id;
+      if (!newLastId || newLastId === lastId) break;
+
+      lastId = newLastId;
+
+      // small delay to avoid rate limits
+      await sleep(350);
     }
 
+    verifiedCacheReady = true;
     console.log(
-      `[Verified] Loaded ${verifiedUserIds.size} user IDs from verification channel (scanned ${Math.min(
-        maxMessages,
-        fetched
-      )} messages)`
+      `[VerifiedCache] Ready. Cached keys: ${cachedVerifiedKeys.size}`
     );
   } catch (err) {
-    console.error('Error loading verified users:', err);
+    console.error("Error during verified cache load:", err?.message || err);
   }
 }
 
-function directTokenLookup(text, acronymIndex, nameIndex) {
-  const tokens = tokenize(text).map((t) => normalize(t));
+// ----------------- ITEM MATCHING (FIXED) -----------------
 
-  for (const token of tokens) {
-    if (!token) continue;
-    const hit = acronymIndex.get(token);
-    if (hit) return hit;
+function scoreCandidateAgainstText(entry, msgNorm, msgTokensSet) {
+  const details = entry.details;
+  const name = details[0] || "";
+  const acronym = details[1] || "";
+
+  const normName = normalize(name);
+  const normAcr = normalize(acronym);
+
+  let score = 0;
+
+  // Strongest: acronym as a whole token
+  if (normAcr && msgTokensSet.has(normAcr)) score += 300;
+
+  // Strong: full name phrase present
+  if (normName && msgNorm.includes(normName)) score += 260;
+
+  // Medium: token overlap with name
+  const nameToks = tokenize(normName);
+  if (nameToks.length) {
+    let hit = 0;
+    for (const t of nameToks) {
+      if (t.length <= 2) continue;
+      if (msgTokensSet.has(t)) hit++;
+    }
+    score += hit * 18;
+
+    // bonus if most tokens hit
+    if (hit >= Math.max(2, Math.floor(nameToks.length * 0.7))) score += 40;
   }
 
-  const joined = normalize(text);
-  const nameHit = nameIndex.get(joined);
-  if (nameHit) return nameHit;
+  // Slight preference for longer / more specific names when tied
+  score += Math.min(30, Math.floor(normName.length / 4));
 
-  return null;
+  return score;
 }
 
-function fuzzyFindByQuery(items, query) {
-  const normQuery = normalize(query);
-  if (!normQuery) return null;
+function pickBestFromCandidates(candidates, messageText) {
+  if (!candidates?.length) return null;
 
-  let bestMatch = null;
-  let bestScore = -999;
+  const msgNorm = normalize(messageText);
+  const msgTokensSet = new Set(tokenize(messageText).map((t) => normalize(t)));
+
+  let best = null;
+  let bestScore = -1;
+
+  for (const entry of candidates) {
+    const s = scoreCandidateAgainstText(entry, msgNorm, msgTokensSet);
+    if (s > bestScore) {
+      bestScore = s;
+      best = entry;
+    }
+  }
+
+  // require a minimum score so we don’t pick random junk
+  if (bestScore < 120) return null;
+  return best;
+}
+
+function findBestItemMatch(items, messageText, aiHintText) {
+  const msgNorm = normalize(messageText);
+  const msgTokens = tokenize(messageText).map((t) => normalize(t));
+  const msgTokensSet = new Set(msgTokens);
+
+  const hintNorm = normalize(aiHintText || "");
+
+  const candidates = [];
+
+  // 1) If Gemini returned something, try:
+  //    - exact acronym token candidates
+  //    - exact name key candidates
+  if (hintNorm) {
+    const acHits = acronymIndex?.get(hintNorm);
+    const nmHits = nameIndex?.get(hintNorm);
+    if (acHits?.length) candidates.push(...acHits);
+    if (nmHits?.length) candidates.push(...nmHits);
+  }
+
+  // 2) Also gather candidates from tokens in the ACTUAL MESSAGE
+  for (const tok of msgTokens) {
+    const hits = acronymIndex?.get(tok);
+    if (hits?.length) candidates.push(...hits);
+  }
+
+  // 3) De-dup candidate list by item id
+  const seen = new Set();
+  const uniq = [];
+  for (const c of candidates) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    uniq.push(c);
+  }
+
+  // 4) Pick best candidate by scoring against message text
+  let best = pickBestFromCandidates(uniq, messageText);
+  if (best) return best;
+
+  // 5) Fallback: broad scan (slower but very accurate when hints fail)
+  //    (still ok; Rolimons item list size is manageable)
+  let bestGlobal = null;
+  let bestScore = -1;
+  const msgTokensSet2 = new Set(msgTokens);
 
   for (const [id, details] of Object.entries(items)) {
-    const name = details[0] || '';
-    const acronym = details[1] || '';
-
-    const normName = normalize(name);
-    const normAcronym = normalize(acronym);
-
-    let score = 0;
-
-    if (normAcronym === normQuery) score += 120;
-    if (normAcronym && normAcronym.startsWith(normQuery)) score += 100;
-    if (normAcronym && normQuery.includes(normAcronym)) score += 80;
-
-    if (normName === normQuery) score += 90;
-    if (normName.includes(normQuery)) score += 70;
-    if (normQuery.includes(normName)) score += 50;
-
-    if (normAcronym && normQuery[0] === normAcronym[0]) score += 10;
-    if (normName && normQuery[0] === normName[0]) score += 5;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = { id, details };
+    const entry = { id, details };
+    const s = scoreCandidateAgainstText(entry, msgNorm, msgTokensSet2);
+    if (s > bestScore) {
+      bestScore = s;
+      bestGlobal = entry;
     }
   }
 
-  if (bestScore < 50) return null;
-  return bestMatch;
+  if (bestScore < 140) return null;
+  return bestGlobal;
 }
 
-function messageSupportsItem(message, details) {
-  const msgTokens = tokenize(message);
-  const msgTokensNorm = msgTokens.map((t) => t.toLowerCase());
+// ----------------- DISCORD EVENTS -----------------
 
-  const name = (details[0] || '').toLowerCase();
-  const acronym = (details[1] || '').toLowerCase();
-  const nameTokens = tokenize(name);
-
-  if (acronym && msgTokensNorm.includes(acronym)) return true;
-
-  for (const nTok of nameTokens) {
-    for (const mTok of msgTokensNorm) {
-      if (nTok === mTok) return true;
-      if (mTok.length >= 3) {
-        if (nTok.startsWith(mTok) || mTok.startsWith(nTok)) return true;
-      }
-    }
-  }
-  return false;
-}
-
-// small sleep helper for the 10s delay
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// build "jump to message" link
-function buildJumpLink(message) {
-  const guildId = message.guild ? message.guild.id : '@me';
-  return `https://discord.com/channels/${guildId}/${message.channel.id}/${message.id}`;
-}
-
-// ------------- DISCORD EVENTS -------------
-
-client.on('ready', async () => {
+client.on("ready", async () => {
   console.log(`[Monitor] Logged in as ${client.user.tag}`);
-  console.log(`[Monitor] Watching channels: ${MONITOR_CHANNEL_IDS.join(', ')}`);
-  console.log(`[Monitor] Checking embeds in: ${VERIFIED_CHANNEL_ID}`);
-  await loadVerifiedUsers(1000);
+  console.log(`[Monitor] Watching channels: ${MONITOR_CHANNEL_IDS.join(", ")}`);
+  console.log(`[Monitor] Verified cache channel: ${VERIFIED_CHANNEL_ID}`);
+
+  await loadVerifiedCache(); // loads entire history like your 2nd script
 });
 
-client.on('messageCreate', async (message) => {
+client.on("messageCreate", async (message) => {
   try {
-    // keep verifiedUserIds up to date
+    // Keep cache updated live: if a new embed appears in the verified channel, cache it.
     if (message.channel.id === VERIFIED_CHANNEL_ID) {
       addVerifiedFromMessage(message);
       return;
     }
 
+    if (!verifiedCacheReady) return;
+
     // only monitor configured channels
     if (!MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
     if (message.author.bot) return;
-    if (!message.content || !message.content.trim()) return;
+    if (!message.content?.trim()) return;
     if (!message.guild) return;
 
-    const userMsg = message.content.trim();
-    const jumpLink = buildJumpLink(message);
-    const authorIdKey = message.author.id;
+    // dedupe on the actual Discord ID (best)
+    const authorKey = message.author.id;
 
-    // EARLY EXIT: if this Discord ID is already seen in verification channel
-    if (
-      verifiedUserIds.has(authorIdKey) ||
-      (await checkVerifiedChannelForUser(authorIdKey, 50))
-    ) {
-      console.log(
-        `[Skip] ${message.author.tag} (ID ${authorIdKey}) is already logged in notifier; ignoring message.`
-      );
-      verifiedUserIds.add(authorIdKey);
+    // if already logged in the verified cache, skip
+    if (cachedVerifiedKeys.has(authorKey)) {
       return;
     }
+
+    // don't double-process the same Discord message
+    if (processedMessages.has(message.id)) return;
+    processedMessages.add(message.id);
+
+    // don't check more than one message per user per runtime
+    if (checkedUsers.has(authorKey)) return;
+    checkedUsers.add(authorKey);
 
     // ROLE FILTER
     let member = message.member;
     if (!member) {
       try {
-        member = await message.guild.members.fetch(message.author.id);
+        member = await message.guild.members.fetch(authorKey);
       } catch {
         return;
       }
     }
 
     const userRoleNames = member.roles.cache
-      .filter((r) => r.name !== '@everyone')
+      .filter((r) => r.name !== "@everyone")
       .map((r) => r.name);
 
     const onlyAllowedRoles =
@@ -417,96 +470,33 @@ client.on('messageCreate', async (message) => {
 
     if (!onlyAllowedRoles) return;
 
-    // don't double-process the same Discord message
-    if (processedMessages.has(message.id)) return;
-    processedMessages.add(message.id);
+    const userMsg = message.content.trim();
+    const jumpLink = buildJumpLink(message);
 
-    // don't check more than one message per user
-    if (checkedUsers.has(message.author.id)) return;
-    checkedUsers.add(message.author.id);
+    const { items } = await getRolimonsData();
 
-    console.log(`[Monitor] New message from ${message.author.tag}: ${userMsg}`);
-
-    const { items, acronymIndex, nameIndex } = await getRolimonsData();
-
-    // ---------- STEP 1: ask Gemini what item this is about ----------
+    // ---------- STEP 1: Gemini hint (not final truth) ----------
     const prompt = `
 You will be given a Discord message from a Roblox trading server.
 
 Your job:
 1. Decide whether the message is clearly referring to a specific Roblox limited item.
 2. If YES, output ONLY the name or acronym of that limited.
-3. If NO (for example, the message is about pictures, permissions, Discord, or something unrelated to a limited), output exactly: UNKNOWN
-
-Examples (YOU MUST FOLLOW THESE):
-
-"how much is valk getting"         -> Valkyrie Helm
-"trading for ice valk"             -> Ice Valkyrie
-"how much does prank get"          -> Prankster
-"how much is skotn getting"        -> Silver King of the Night
-"how much does stv get"            -> Sparkle Time Valkyrie
-"is pv good?"                      -> Playful Vampire
-"bv good or nah"                   -> Blackvalk
-"what is chicken getting rn"       -> Telamon's Chicken Suit
-"is dw good guys"                  -> Dog Whisperer
-"dw good rn"                       -> Dog Whisperer
-"is supa good rn"                  -> Supa Fly Cap
-
-# Very important negative examples (should be UNKNOWN):
-"how do i get pic perms"
-"how do i send pics in here"
-"can someone give me img perms"
-"bro someone is trying to beam me"
-"flipped is sub 2k lmao"
-"your better off getting space hair or sta"
-"i cant see the images"
+3. If NO, output exactly: UNKNOWN
 
 Message: ${userMsg}
 `;
-
     const aiResult = await model.generateContent(prompt);
     const aiTextRaw = aiResult.response.text().trim();
-    const aiText = aiTextRaw.replace(/^"|"$/g, '');
+    const aiHint = aiTextRaw.replace(/^"|"$/g, "");
 
-    console.log(`[Gemini] Interpreted item key: "${aiText}"`);
-
-    if (!aiText || aiText.toUpperCase() === 'UNKNOWN') {
-      console.log(
-        `[Skip] No limited detected in message: "${userMsg}" (Gemini UNKNOWN)`
-      );
+    if (!aiHint || aiHint.toUpperCase() === "UNKNOWN") {
       return;
     }
 
-    // ---------- STEP 2: map Gemini's key to a Rolimons item ----------
-    let item =
-      directTokenLookup(aiText, acronymIndex, nameIndex) ||
-      fuzzyFindByQuery(items, aiText);
-
-    const tokenItemFromMsg = directTokenLookup(
-      userMsg,
-      acronymIndex,
-      nameIndex
-    );
-
-    if (tokenItemFromMsg) {
-      if (!item || tokenItemFromMsg.id !== item.id) {
-        console.log(
-          `[Override] Using token-based match "${tokenItemFromMsg.details[0]}" instead of Gemini match "${
-            item ? item.details[0] : 'none'
-          }"`
-        );
-        item = tokenItemFromMsg;
-      }
-    } else if (!item) {
-      item = fuzzyFindByQuery(items, userMsg);
-    }
-
-    if (!item) {
-      console.log(
-        `[Skip] No Rolimons match for interpreted key "${aiText}" from message "${userMsg}"`
-      );
-      return;
-    }
+    // ---------- STEP 2: Correct Rolimons item match (scored) ----------
+    const item = findBestItemMatch(items, userMsg, aiHint);
+    if (!item) return;
 
     const itemId = item.id;
     const details = item.details;
@@ -516,56 +506,31 @@ Message: ${userMsg}
     const rap = details[2];
     const value = details[3];
 
-    // -------- value threshold (>100k only) --------
     const numericValue = Number(value) || 0;
-    if (numericValue <= MIN_ITEM_VALUE) {
-      console.log(
-        `[Skip] Item "${name}" value ${numericValue} <= MIN_ITEM_VALUE (${MIN_ITEM_VALUE})`
-      );
-      return;
-    }
+    if (numericValue <= MIN_ITEM_VALUE) return;
 
-    // ---------- STEP 3: make sure item is clearly mentioned ----------
-    if (!messageSupportsItem(userMsg, details)) {
-      console.log(
-        `[Skip] Item "${name}" not clearly mentioned in message: "${userMsg}"`
-      );
-      return;
-    }
+    // ---------- STEP 3: 10s delay then re-check VERIFIED CACHE ----------
+    await sleep(10000);
 
-    console.log(
-      `[Rolimons] Match: ${name} (${acronym}) | Value: ${numericValue} | RAP: ${rap}`
-    );
+    // If they got logged during the delay, skip.
+    if (cachedVerifiedKeys.has(authorKey)) return;
 
-    // ---------- STEP 3.5: wait 10 seconds, then re-check verification ----------
-    await sleep(10000); // 10s delay
-
-    if (
-      verifiedUserIds.has(message.author.id) ||
-      (await checkVerifiedChannelForUser(message.author.id, 50))
-    ) {
-      console.log(
-        `[DelaySkip] ${message.author.tag} (ID ${message.author.id}) is now logged in notifier; not sending.`
-      );
-      verifiedUserIds.add(message.author.id);
-      return;
-    }
-
-    // ---------- STEP 4: get Roblox thumbnail ----------
+    // ---------- STEP 4: get thumbnail ----------
     const thumbnailUrl = await getItemThumbnail(itemId);
 
     // ---------- STEP 5: send webhook ----------
     const embed = {
-      title: 'High Value Item Mentioned',
+      title: "High Value Item Mentioned",
       description:
         `**Message:** ${userMsg}\n` +
         `**Discord:** ${message.author.tag}\n` +
-        `**Discord ID:** ${message.author.id}\n` +
+        `**Discord ID:** ${authorKey}\n` +
         `**Jump:** ${jumpLink}\n\n` +
-        `**Item:** ${name}${acronym ? ` (${acronym})` : ''}\n` +
-        `**Value:** ${formatValue(numericValue)}`,
+        `**Item:** ${name}${acronym ? ` (${acronym})` : ""}\n` +
+        `**Value:** ${formatValue(numericValue)}\n` +
+        `**RAP:** ${formatValue(rap)}`,
       color: 0x00a2ff,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
 
     if (thumbnailUrl) {
@@ -574,51 +539,21 @@ Message: ${userMsg}
 
     await axios.post(WEBHOOK_URL, { embeds: [embed] });
   } catch (err) {
-    console.error('[Monitor] Error processing message:', err);
-
-    try {
-      const jumpLink = buildJumpLink(message);
-
-      await axios.post(WEBHOOK_URL, {
-        embeds: [
-          {
-            title: 'Error Processing Message',
-            description:
-              `**Message:** ${message.content}\n` +
-              `**Discord:** ${
-                message.author ? message.author.tag : 'Unknown'
-              }\n` +
-              `**Discord ID:** ${
-                message.author ? message.author.id : 'Unknown'
-              }\n` +
-              `**Jump:** ${jumpLink}\n` +
-              `**Error:** ${err.message}`,
-            color: 0xff0000,
-            timestamp: new Date().toISOString()
-          }
-        ]
-      });
-    } catch (webhookError) {
-      console.error(
-        '[Monitor] Error sending error webhook:',
-        webhookError.message
-      );
-    }
+    console.error("[Monitor] Error processing message:", err?.message || err);
   }
 });
 
-// ------------- STARTUP -------------
-
-client.on('error', (e) => console.error('Discord client error:', e));
-process.on('unhandledRejection', (e) =>
-  console.error('Unhandled promise rejection:', e)
+client.on("error", (e) => console.error("Discord client error:", e));
+process.on("unhandledRejection", (e) =>
+  console.error("Unhandled promise rejection:", e)
 );
-process.on('SIGINT', () => {
-  console.log('Shutting down...');
+
+process.on("SIGINT", () => {
+  console.log("Shutting down...");
   process.exit(0);
 });
 
 client.login(TOKEN).catch((e) => {
-  console.error('Failed to login:', e);
+  console.error("Failed to login:", e);
   process.exit(1);
 });
