@@ -292,4 +292,4 @@ async function extractItemsFromImage(base64, mime) {
 
 function parseGeminiResponse(raw) {
   let text = raw.trim();
-  const backtickFence = "
+  const backtickFence = ""
