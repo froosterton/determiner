@@ -292,4 +292,164 @@ async function extractItemsFromImage(base64, mime) {
 
 function parseGeminiResponse(raw) {
   let text = raw.trim();
-  const backtickFence = ""
+  const backtickFence = "```";
+  const jsonStart = text.indexOf(backtickFence);
+  if (jsonStart !== -1) {
+    const afterFence = text.slice(jsonStart + backtickFence.length);
+    const endFence = afterFence.indexOf(backtickFence);
+    if (endFence !== -1) {
+      text = afterFence.slice(0, endFence).trim();
+    } else {
+      text = afterFence.trim();
+    }
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// ----------------- VERIFIED CACHE -----------------
+
+async function loadVerifiedCache() {
+  if (verifiedCacheReady) return;
+  try {
+    const channel = await client.channels.fetch(VERIFIED_CHANNEL_ID).catch(() => null);
+    if (!channel) return;
+    let lastId;
+    let count = 0;
+    do {
+      const opts = { limit: 100 };
+      if (lastId) opts.before = lastId;
+      const messages = await channel.messages.fetch(opts).catch(() => new Map());
+      if (messages.size === 0) break;
+      for (const [, msg] of messages) {
+        const key = `${msg.author?.id || ""}:${msg.channel?.id || ""}:${msg.id || ""}`;
+        cachedVerifiedKeys.add(key);
+        count++;
+      }
+      lastId = messages.last()?.id;
+    } while (messages.size === 100 && count < 5000);
+    verifiedCacheReady = true;
+    console.log(`[Verified] Loaded ${cachedVerifiedKeys.size} cached keys`);
+  } catch (err) {
+    console.error("[Verified] Cache load error:", err.message);
+  }
+}
+
+function isVerified(message) {
+  const key = `${message.author?.id || ""}:${message.channel?.id || ""}:${message.id || ""}`;
+  return cachedVerifiedKeys.has(key);
+}
+
+// ----------------- WEBHOOK -----------------
+
+async function sendWebhook(embed) {
+  try {
+    await axios.post(WEBHOOK_URL, {
+      embeds: [embed],
+    }, { timeout: 10000 });
+  } catch (err) {
+    console.error("[Webhook] Error:", err.message);
+  }
+}
+
+// ----------------- MESSAGE HANDLER -----------------
+
+async function processMessage(message) {
+  if (!message.guild || !MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
+  const msgKey = `${message.channel.id}:${message.id}`;
+  if (processedMessages.has(msgKey)) return;
+  processedMessages.add(msgKey);
+  if (processedMessages.size > 50000) {
+    const arr = [...processedMessages];
+    processedMessages.clear();
+    for (let i = arr.length - 25000; i < arr.length; i++) processedMessages.add(arr[i]);
+  }
+
+  const urls = extractImageUrls(message);
+  if (urls.length === 0) return;
+
+  for (const url of urls) {
+    try {
+      const { base64, mime } = await downloadImageBase64(url);
+      const isRelevant = await prescreenImage(base64, mime);
+      if (!isRelevant) continue;
+
+      await sleep(500);
+      const rawItems = await extractItemsFromImage(base64, mime);
+      const items = parseGeminiResponse(rawItems);
+      if (!items.length) continue;
+
+      const { items: roliItems } = await getRolimonsData();
+      const matched = [];
+      for (const it of items) {
+        const name = String(it.name || "").trim();
+        const val = Number(it.value) || 0;
+        const norm = normalizeName(name);
+        const byName = nameLookup[norm];
+        const byAcr = acronymLookup[norm] || (norm.length <= 4 ? acronymLookup[norm] : null);
+        const entry = byName || byAcr;
+        if (!entry) continue;
+        const d = entry.data;
+        const rap = itemValue(d);
+        if (rap < MIN_ITEM_VALUE) continue;
+        const displayVal = val > 0 ? val : rap;
+        matched.push({
+          id: entry.id,
+          name: d[0] || name,
+          value: displayVal,
+          rap,
+        });
+      }
+      if (matched.length === 0) continue;
+
+      const totalValue = matched.reduce((s, m) => s + m.value, 0);
+      const jumpLink = buildJumpLink(message);
+      const thumbUrl = matched[0]?.id ? await getItemThumbnail(matched[0].id) : null;
+
+      const embed = {
+        title: "Limited Item Detected",
+        url: jumpLink,
+        description: matched
+          .map((m) => `**${m.name}** — ${formatValue(m.value)}`)
+          .join("\n"),
+        color: 0x00ff00,
+        thumbnail: thumbUrl ? { url: thumbUrl } : undefined,
+        fields: [
+          { name: "Total Value", value: formatValue(totalValue), inline: true },
+          { name: "Channel", value: `<#${message.channel.id}>`, inline: true },
+          { name: "Author", value: `${message.author?.tag || "Unknown"}`, inline: true },
+        ],
+        footer: { text: `Message ID: ${message.id}` },
+        timestamp: new Date().toISOString(),
+      };
+
+      await sendWebhook(embed);
+      await sleep(1000);
+    } catch (err) {
+      console.error("[Process] Error:", err.message);
+    }
+  }
+}
+
+// ----------------- CLIENT EVENTS -----------------
+
+client.on("ready", async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  await getRolimonsData();
+  await loadVerifiedCache();
+});
+
+client.on("messageCreate", async (message) => {
+  processMessage(message).catch(() => {});
+});
+
+// ----------------- START -----------------
+
+client.login(TOKEN).catch((err) => {
+  console.error("Login failed:", err.message);
+  process.exit(1);
+});
