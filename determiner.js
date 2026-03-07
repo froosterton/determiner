@@ -68,7 +68,7 @@ if (!WEBHOOK_URL) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-const visionModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+const visionModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
 
 // ----------------- DISCORD CLIENT -----------------
 
@@ -320,18 +320,20 @@ async function loadVerifiedCache() {
     if (!channel) return;
     let lastId;
     let count = 0;
+    let batchSize;
     do {
       const opts = { limit: 100 };
       if (lastId) opts.before = lastId;
       const messages = await channel.messages.fetch(opts).catch(() => new Map());
-      if (messages.size === 0) break;
+      batchSize = messages.size;
+      if (batchSize === 0) break;
       for (const [, msg] of messages) {
         const key = `${msg.author?.id || ""}:${msg.channel?.id || ""}:${msg.id || ""}`;
         cachedVerifiedKeys.add(key);
         count++;
       }
       lastId = messages.last()?.id;
-    } while (messages.size === 100 && count < 5000);
+    } while (batchSize === 100 && count < 5000);
     verifiedCacheReady = true;
     console.log(`[Verified] Loaded ${cachedVerifiedKeys.size} cached keys`);
   } catch (err) {
