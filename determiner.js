@@ -17,7 +17,6 @@ const MONITOR_CHANNEL_IDS = [
 const VERIFIED_CHANNEL_ID = "1403167119071248548";
 
 const ROLIMONS_API = "https://api.rolimons.com/items/v2/itemdetails";
-const ROLIMONS_LEGACY_API = "https://www.rolimons.com/itemapi/itemdetails";
 
 const MIN_ITEM_VALUE = 100000; // 100K
 
@@ -45,12 +44,6 @@ const ALLOWED_ROLES = [
   "Projection Pings",
 ];
 
-const BASE_ACRONYM_BLACKLIST = new Set([
-  "mm", "dc", "w", "l", "f", "op", "pc", "nvm", "pm", "dm", "rn", "gg", "bb", "gl", "ty",
-  "np", "lf", "ft", "nft", "id", "da", "fb", "sc", "rt", "ep", "hb",
-  "ci", "aa", "dh", "rs", "gw", "ac", "iv", "es", "bm",
-]);
-
 if (!TOKEN) {
   console.error("DISCORD_TOKEN is not set");
   process.exit(1);
@@ -67,45 +60,36 @@ if (!WEBHOOK_URL) {
 // ----------------- GEMINI SETUP -----------------
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const visionModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 // ----------------- DISCORD CLIENT -----------------
 
 const client = new Client({ checkUpdate: false });
 
 const processedMessages = new Set();
+// track users we've already *checked* once (per runtime)
 const checkedUsers = new Set();
 
-const cachedVerifiedKeys = new Set();
+// ---- VERIFIED CACHE (like your 2nd script) ----
+const cachedVerifiedKeys = new Set(); // stores Discord IDs primarily
 let verifiedCacheReady = false;
 
 // ----------------- ROLIMONS CACHE -----------------
 
 let itemsCache = null;
 let lastItemsFetch = 0;
-let nameLookup = {};
-let acronymLookup = {};
-let acronymBlacklist = new Set();
+
+// indexes store ARRAYS, not single entries
+let acronymIndex = null; // Map<string, Array<{id, details}>>
+let nameIndex = null; // Map<string, Array<{id, details}>>
 
 // ----------------- HELPERS -----------------
 
 function normalize(str) {
   return String(str || "")
     .toLowerCase()
-    .replace(/\u2019/g, "'")
-    .replace(/\u2018/g, "'")
-    .replace(/'s/g, "s")
-    .replace(/[^a-z0-9\s]+/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
     .trim();
-}
-
-function normalizeName(name) {
-  let s = String(name || "").toLowerCase().trim();
-  s = s.replace(/\u2019/g, "'").replace(/\u2018/g, "'");
-  s = s.replace(/'s/g, "s");
-  s = s.replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-  return s;
 }
 
 function tokenize(str) {
@@ -119,60 +103,42 @@ function addToIndex(map, key, value) {
   else arr.push(value);
 }
 
-function itemValue(d) {
-  return d[3] && d[3] !== -1 ? d[3] : d[2] || 0;
-}
+function buildIndexes(items) {
+  acronymIndex = new Map();
+  nameIndex = new Map();
 
-function rebuildAcronymBlacklist() {
-  acronymBlacklist = new Set();
-  for (const word of BASE_ACRONYM_BLACKLIST) {
-    if (acronymLookup[word]) {
-      // keep as real item
-    } else {
-      acronymBlacklist.add(word);
-    }
-  }
-}
+  for (const [id, details] of Object.entries(items)) {
+    const name = details[0] || "";
+    const acronym = details[1] || "";
 
-function buildLookupTables(items) {
-  const nl = {};
-  const al = {};
-  for (const [id, d] of Object.entries(items)) {
-    const name = d[0] || "";
-    const acr = (d[1] || "").trim().toLowerCase();
-    nl[normalizeName(name)] = { id, data: d };
-    if (acr) al[acr] = { id, data: d };
+    const normName = normalize(name);
+    const normAcr = normalize(acronym);
+
+    const entry = { id, details };
+
+    // multiple items can share same acronym/name key → store arrays
+    if (normAcr) addToIndex(acronymIndex, normAcr, entry);
+    if (normName) addToIndex(nameIndex, normName, entry);
   }
-  nameLookup = nl;
-  acronymLookup = al;
-  rebuildAcronymBlacklist();
 }
 
 async function getRolimonsData() {
   const now = Date.now();
+
   if (itemsCache && now - lastItemsFetch < 10 * 60 * 1000) {
-    return { items: itemsCache, nameLookup, acronymLookup };
+    return { items: itemsCache, acronymIndex, nameIndex };
   }
 
-  try {
-    const res = await axios.get(ROLIMONS_API, { timeout: 15000 });
-    if (res.data?.items) {
-      itemsCache = res.data.items;
-    } else {
-      const legacy = await axios.get(ROLIMONS_LEGACY_API, {
-        headers: { "User-Agent": "VisionScanner/1.0" },
-        timeout: 15000,
-      });
-      if (legacy.data?.items) itemsCache = legacy.data.items;
-    }
-  } catch {
-    if (itemsCache) return { items: itemsCache, nameLookup, acronymLookup };
-    throw new Error("Failed to fetch Rolimons data");
+  const res = await axios.get(ROLIMONS_API);
+  if (!res.data || !res.data.items) {
+    throw new Error("Invalid Rolimons API response");
   }
 
-  lastItemsFetch = Date.now();
-  buildLookupTables(itemsCache);
-  return { items: itemsCache, nameLookup, acronymLookup };
+  itemsCache = res.data.items;
+  lastItemsFetch = now;
+  buildIndexes(itemsCache);
+
+  return { items: itemsCache, acronymIndex, nameIndex };
 }
 
 function formatValue(value) {
@@ -192,9 +158,10 @@ async function getItemThumbnail(itemId) {
         format: "Png",
         isCircular: false,
       },
-      timeout: 5000,
     });
-    if (res.data?.data?.[0]?.imageUrl) return res.data.data[0].imageUrl;
+
+    const data = res.data;
+    if (data?.data?.[0]?.imageUrl) return data.data[0].imageUrl;
   } catch (err) {
     console.error("[Thumbnail] Error:", err.message);
   }
@@ -210,247 +177,383 @@ function buildJumpLink(message) {
   return `https://discord.com/channels/${guildId}/${message.channel.id}/${message.id}`;
 }
 
-// ----------------- IMAGE EXTRACTION -----------------
+// ----------------- VERIFIED CACHE HELPERS -----------------
 
-function extractImageUrls(message) {
-  const urls = [];
-  for (const [, att] of message.attachments || []) {
-    const ct = att.contentType || "";
-    if (ct.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp)$/i.test(att.name || "")) {
-      urls.push(att.url);
+function extractDiscordIdFromEmbed(embed) {
+  const regex = /discord id[:\s]*([0-9]{5,})/i;
+
+  if (embed.description) {
+    const m = embed.description.match(regex);
+    if (m) return m[1].trim();
+  }
+
+  if (embed.fields?.length) {
+    for (const field of embed.fields) {
+      const text =
+        (field.name ? String(field.name) + "\n" : "") +
+        (field.value ? String(field.value) : "");
+      const m = text.match(regex);
+      if (m) return m[1].trim();
     }
   }
-  for (const embed of message.embeds || []) {
-    if (embed.image?.url) urls.push(embed.image.url);
-    if (embed.thumbnail?.url) urls.push(embed.thumbnail.url);
-  }
-  return urls;
+
+  return null;
 }
 
-async function downloadImageBase64(url) {
-  const resp = await axios.get(url, { responseType: "arraybuffer", timeout: 30000 });
-  const mime = (resp.headers["content-type"] || "image/jpeg").split(";")[0].trim();
-  return { base64: Buffer.from(resp.data).toString("base64"), mime };
-}
-
-// ----------------- GEMINI IMAGE PROMPTS -----------------
-
-async function prescreenImage(base64, mime) {
-  const prompt =
-    "Look at this image carefully.\n" +
-    "Is this image referencing a Roblox limited item? " +
-    "Roblox limited items are special virtual accessories/gear that can be traded " +
-    "between players (hats, faces, gear, etc.).\n\n" +
-    "Signs that an image references a limited item:\n" +
-    "- A Roblox trade window showing items\n" +
-    "- An inventory showing items with RAP/value numbers\n" +
-    "- Text mentioning specific Roblox limited item names or acronyms\n" +
-    "- A Roblox avatar wearing recognizable limited items\n" +
-    "- A Rolimons page or similar value-checking site\n\n" +
-    "Answer with ONLY the word: yes or no";
-
-  const res = await visionModel.generateContent([
-    prompt,
-    { inlineData: { data: base64, mimeType: mime } },
-  ]);
-  return res.response.text().trim().toLowerCase().startsWith("yes");
-}
-
-async function extractItemsFromImage(base64, mime) {
-  const prompt =
-    "This image is from a Discord post about Roblox limited items.\n" +
-    "Your job is to identify EVERY Roblox limited item name mentioned or shown " +
-    "anywhere in this image.\n\n" +
-    "The image could be ANY of these formats:\n" +
-    "- A Roblox trade window showing items on both sides\n" +
-    "- An inventory or catalog screenshot\n" +
-    "- A Rolimons value change notification\n" +
-    "- A Rolimons item page or chart\n" +
-    "- A text post or meme mentioning item names\n" +
-    "- An avatar wearing limited items\n" +
-    "- A screenshot of any Roblox-related site or app\n\n" +
-    "For each item, extract:\n" +
-    '- "name": the full item name exactly as displayed\n' +
-    '- "value": highest numerical value shown (RAP, value, price). 0 if none visible.\n\n' +
-    "Return ONLY a valid JSON array of objects.\n" +
-    "Examples:\n" +
-    '  [{"name":"Domino Crown","value":24000000}]\n' +
-    '  [{"name":"Bighead","value":5000},{"name":"Goldrow","value":316}]\n\n' +
-    "Important:\n" +
-    "- Read EXACT item names from the image, do not guess.\n" +
-    "- Commas in numbers (4,200,000) → plain number (4200000).\n" +
-    "- Look EVERYWHERE in the image.\n" +
-    "- If no items found, return: []";
-
-  const res = await visionModel.generateContent([
-    prompt,
-    { inlineData: { data: base64, mimeType: mime } },
-  ]);
-  return res.response.text();
-}
-
-function parseGeminiResponse(raw) {
-  let text = raw.trim();
-  const backtickFence = "```";
-  const jsonStart = text.indexOf(backtickFence);
-  if (jsonStart !== -1) {
-    const afterFence = text.slice(jsonStart + backtickFence.length);
-    const endFence = afterFence.indexOf(backtickFence);
-    if (endFence !== -1) {
-      text = afterFence.slice(0, endFence).trim();
-    } else {
-      text = afterFence.trim();
-    }
-  }
-  try {
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-// ----------------- VERIFIED CACHE -----------------
-
-async function loadVerifiedCache() {
-  if (verifiedCacheReady) return;
-  try {
-    const channel = await client.channels.fetch(VERIFIED_CHANNEL_ID).catch(() => null);
-    if (!channel) return;
-    let lastId;
-    let count = 0;
-    let batchSize;
-    do {
-      const opts = { limit: 100 };
-      if (lastId) opts.before = lastId;
-      const messages = await channel.messages.fetch(opts).catch(() => new Map());
-      batchSize = messages.size;
-      if (batchSize === 0) break;
-      for (const [, msg] of messages) {
-        const key = `${msg.author?.id || ""}:${msg.channel?.id || ""}:${msg.id || ""}`;
-        cachedVerifiedKeys.add(key);
-        count++;
+// Optional fallback for old-style embeds that only store "Discord: name"
+function extractDiscordTagFromEmbed(embed) {
+  // fields
+  if (embed.fields?.length) {
+    for (const f of embed.fields) {
+      const nm = String(f.name || "").replace(/\*\*/g, "").trim().toLowerCase();
+      if (nm.includes("discord")) {
+        const v = String(f.value || "").trim();
+        return v || null;
       }
-      lastId = messages.last()?.id;
-    } while (batchSize === 100 && count < 5000);
+    }
+  }
+  // description lines
+  if (embed.description) {
+    const lines = embed.description.split("\n");
+    for (let line of lines) {
+      line = line.replace(/\*\*/g, "").trim();
+      if (line.toLowerCase().startsWith("discord:")) {
+        return line.split(":").slice(1).join(":").trim() || null;
+      }
+    }
+  }
+  return null;
+}
+
+function addVerifiedFromMessage(msg) {
+  if (!msg.embeds?.length) return;
+
+  for (const embed of msg.embeds) {
+    const id = extractDiscordIdFromEmbed(embed);
+    if (id) {
+      cachedVerifiedKeys.add(id); // ID-only mode (best)
+      continue;
+    }
+
+    // OPTIONAL: if you want old-style "Discord:" entries to also dedupe
+    // uncomment next 2 lines:
+    // const tag = extractDiscordTagFromEmbed(embed);
+    // if (tag) cachedVerifiedKeys.add(tag.toLowerCase());
+  }
+}
+
+async function loadVerifiedCache(maxMessages = Infinity) {
+  const channel =
+    client.channels.cache.get(VERIFIED_CHANNEL_ID) ||
+    (await client.channels.fetch(VERIFIED_CHANNEL_ID).catch(() => null));
+
+  if (!channel) {
+    console.log("Could not fetch verified channel.");
+    return;
+  }
+
+  console.log("[VerifiedCache] Loading ALL messages into cache...");
+
+  try {
+    let lastId = null;
+    let fetched = 0;
+    let batch = 0;
+
+    while (true) {
+      const options = { limit: 100 };
+      if (lastId) options.before = lastId;
+
+      const messages = await channel.messages.fetch(options);
+      batch++;
+
+      if (messages.size === 0) break;
+
+      messages.forEach((m) => addVerifiedFromMessage(m));
+
+      fetched += messages.size;
+      if (fetched >= maxMessages) break;
+
+      const newLastId = messages.last()?.id;
+      if (!newLastId || newLastId === lastId) break;
+
+      lastId = newLastId;
+
+      // small delay to avoid rate limits
+      await sleep(350);
+    }
+
     verifiedCacheReady = true;
-    console.log(`[Verified] Loaded ${cachedVerifiedKeys.size} cached keys`);
+    console.log(
+      `[VerifiedCache] Ready. Cached keys: ${cachedVerifiedKeys.size}`
+    );
   } catch (err) {
-    console.error("[Verified] Cache load error:", err.message);
+    console.error("Error during verified cache load:", err?.message || err);
   }
 }
 
-function isVerified(message) {
-  const key = `${message.author?.id || ""}:${message.channel?.id || ""}:${message.id || ""}`;
-  return cachedVerifiedKeys.has(key);
+// ----------------- ITEM MATCHING (FIXED) -----------------
+
+function scoreCandidateAgainstText(entry, msgNorm, msgTokensSet) {
+  const details = entry.details;
+  const name = details[0] || "";
+  const acronym = details[1] || "";
+
+  const normName = normalize(name);
+  const normAcr = normalize(acronym);
+
+  let score = 0;
+
+  // Strongest: acronym as a whole token
+  if (normAcr && msgTokensSet.has(normAcr)) score += 300;
+
+  // Strong: full name phrase present
+  if (normName && msgNorm.includes(normName)) score += 260;
+
+  // Medium: token overlap with name
+  const nameToks = tokenize(normName);
+  if (nameToks.length) {
+    let hit = 0;
+    for (const t of nameToks) {
+      if (t.length <= 2) continue;
+      if (msgTokensSet.has(t)) hit++;
+    }
+    score += hit * 18;
+
+    // bonus if most tokens hit
+    if (hit >= Math.max(2, Math.floor(nameToks.length * 0.7))) score += 40;
+  }
+
+  // Slight preference for longer / more specific names when tied
+  score += Math.min(30, Math.floor(normName.length / 4));
+
+  return score;
 }
 
-// ----------------- WEBHOOK -----------------
+function pickBestFromCandidates(candidates, messageText) {
+  if (!candidates?.length) return null;
 
-async function sendWebhook(embed) {
-  try {
-    await axios.post(WEBHOOK_URL, {
-      embeds: [embed],
-    }, { timeout: 10000 });
-  } catch (err) {
-    console.error("[Webhook] Error:", err.message);
-  }
-}
+  const msgNorm = normalize(messageText);
+  const msgTokensSet = new Set(tokenize(messageText).map((t) => normalize(t)));
 
-// ----------------- MESSAGE HANDLER -----------------
+  let best = null;
+  let bestScore = -1;
 
-async function processMessage(message) {
-  if (!message.guild || !MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
-  const msgKey = `${message.channel.id}:${message.id}`;
-  if (processedMessages.has(msgKey)) return;
-  processedMessages.add(msgKey);
-  if (processedMessages.size > 50000) {
-    const arr = [...processedMessages];
-    processedMessages.clear();
-    for (let i = arr.length - 25000; i < arr.length; i++) processedMessages.add(arr[i]);
-  }
-
-  const urls = extractImageUrls(message);
-  if (urls.length === 0) return;
-
-  for (const url of urls) {
-    try {
-      const { base64, mime } = await downloadImageBase64(url);
-      const isRelevant = await prescreenImage(base64, mime);
-      if (!isRelevant) continue;
-
-      await sleep(500);
-      const rawItems = await extractItemsFromImage(base64, mime);
-      const items = parseGeminiResponse(rawItems);
-      if (!items.length) continue;
-
-      const { items: roliItems } = await getRolimonsData();
-      const matched = [];
-      for (const it of items) {
-        const name = String(it.name || "").trim();
-        const val = Number(it.value) || 0;
-        const norm = normalizeName(name);
-        const byName = nameLookup[norm];
-        const byAcr = acronymLookup[norm] || (norm.length <= 4 ? acronymLookup[norm] : null);
-        const entry = byName || byAcr;
-        if (!entry) continue;
-        const d = entry.data;
-        const rap = itemValue(d);
-        if (rap < MIN_ITEM_VALUE) continue;
-        const displayVal = val > 0 ? val : rap;
-        matched.push({
-          id: entry.id,
-          name: d[0] || name,
-          value: displayVal,
-          rap,
-        });
-      }
-      if (matched.length === 0) continue;
-
-      const totalValue = matched.reduce((s, m) => s + m.value, 0);
-      const jumpLink = buildJumpLink(message);
-      const thumbUrl = matched[0]?.id ? await getItemThumbnail(matched[0].id) : null;
-
-      const embed = {
-        title: "Limited Item Detected",
-        url: jumpLink,
-        description: matched
-          .map((m) => `**${m.name}** — ${formatValue(m.value)}`)
-          .join("\n"),
-        color: 0x00ff00,
-        thumbnail: thumbUrl ? { url: thumbUrl } : undefined,
-        fields: [
-          { name: "Total Value", value: formatValue(totalValue), inline: true },
-          { name: "Channel", value: `<#${message.channel.id}>`, inline: true },
-          { name: "Author", value: `${message.author?.tag || "Unknown"}`, inline: true },
-        ],
-        footer: { text: `Message ID: ${message.id}` },
-        timestamp: new Date().toISOString(),
-      };
-
-      await sendWebhook(embed);
-      await sleep(1000);
-    } catch (err) {
-      console.error("[Process] Error:", err.message);
+  for (const entry of candidates) {
+    const s = scoreCandidateAgainstText(entry, msgNorm, msgTokensSet);
+    if (s > bestScore) {
+      bestScore = s;
+      best = entry;
     }
   }
+
+  // require a minimum score so we don’t pick random junk
+  if (bestScore < 120) return null;
+  return best;
 }
 
-// ----------------- CLIENT EVENTS -----------------
+function findBestItemMatch(items, messageText, aiHintText) {
+  const msgNorm = normalize(messageText);
+  const msgTokens = tokenize(messageText).map((t) => normalize(t));
+  const msgTokensSet = new Set(msgTokens);
+
+  const hintNorm = normalize(aiHintText || "");
+
+  const candidates = [];
+
+  // 1) If Gemini returned something, try:
+  //    - exact acronym token candidates
+  //    - exact name key candidates
+  if (hintNorm) {
+    const acHits = acronymIndex?.get(hintNorm);
+    const nmHits = nameIndex?.get(hintNorm);
+    if (acHits?.length) candidates.push(...acHits);
+    if (nmHits?.length) candidates.push(...nmHits);
+  }
+
+  // 2) Also gather candidates from tokens in the ACTUAL MESSAGE
+  for (const tok of msgTokens) {
+    const hits = acronymIndex?.get(tok);
+    if (hits?.length) candidates.push(...hits);
+  }
+
+  // 3) De-dup candidate list by item id
+  const seen = new Set();
+  const uniq = [];
+  for (const c of candidates) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    uniq.push(c);
+  }
+
+  // 4) Pick best candidate by scoring against message text
+  let best = pickBestFromCandidates(uniq, messageText);
+  if (best) return best;
+
+  // 5) Fallback: broad scan (slower but very accurate when hints fail)
+  //    (still ok; Rolimons item list size is manageable)
+  let bestGlobal = null;
+  let bestScore = -1;
+  const msgTokensSet2 = new Set(msgTokens);
+
+  for (const [id, details] of Object.entries(items)) {
+    const entry = { id, details };
+    const s = scoreCandidateAgainstText(entry, msgNorm, msgTokensSet2);
+    if (s > bestScore) {
+      bestScore = s;
+      bestGlobal = entry;
+    }
+  }
+
+  if (bestScore < 140) return null;
+  return bestGlobal;
+}
+
+// ----------------- DISCORD EVENTS -----------------
 
 client.on("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  await getRolimonsData();
-  await loadVerifiedCache();
+  console.log(`[Monitor] Logged in as ${client.user.tag}`);
+  console.log(`[Monitor] Watching channels: ${MONITOR_CHANNEL_IDS.join(", ")}`);
+  console.log(`[Monitor] Verified cache channel: ${VERIFIED_CHANNEL_ID}`);
+
+  await loadVerifiedCache(); // loads entire history like your 2nd script
 });
 
 client.on("messageCreate", async (message) => {
-  processMessage(message).catch(() => {});
+  try {
+    // Keep cache updated live: if a new embed appears in the verified channel, cache it.
+    if (message.channel.id === VERIFIED_CHANNEL_ID) {
+      addVerifiedFromMessage(message);
+      return;
+    }
+
+    if (!verifiedCacheReady) return;
+
+    // only monitor configured channels
+    if (!MONITOR_CHANNEL_IDS.includes(message.channel.id)) return;
+    if (message.author.bot) return;
+    if (!message.content?.trim()) return;
+    if (!message.guild) return;
+
+    // dedupe on the actual Discord ID (best)
+    const authorKey = message.author.id;
+
+    // if already logged in the verified cache, skip
+    if (cachedVerifiedKeys.has(authorKey)) {
+      return;
+    }
+
+    // don't double-process the same Discord message
+    if (processedMessages.has(message.id)) return;
+    processedMessages.add(message.id);
+
+    // don't check more than one message per user per runtime
+    if (checkedUsers.has(authorKey)) return;
+    checkedUsers.add(authorKey);
+
+    // ROLE FILTER
+    let member = message.member;
+    if (!member) {
+      try {
+        member = await message.guild.members.fetch(authorKey);
+      } catch {
+        return;
+      }
+    }
+
+    const userRoleNames = member.roles.cache
+      .filter((r) => r.name !== "@everyone")
+      .map((r) => r.name);
+
+    const onlyAllowedRoles =
+      userRoleNames.length > 0 &&
+      userRoleNames.every((roleName) => ALLOWED_ROLES.includes(roleName));
+
+    if (!onlyAllowedRoles) return;
+
+    const userMsg = message.content.trim();
+    const jumpLink = buildJumpLink(message);
+
+    const { items } = await getRolimonsData();
+
+    // ---------- STEP 1: Gemini hint (not final truth) ----------
+    const prompt = `
+You will be given a Discord message from a Roblox trading server.
+
+Your job:
+1. Decide whether the message is clearly referring to a specific Roblox limited item.
+2. If YES, output ONLY the name or acronym of that limited.
+3. If NO, output exactly: UNKNOWN
+
+Message: ${userMsg}
+`;
+    const aiResult = await model.generateContent(prompt);
+    const aiTextRaw = aiResult.response.text().trim();
+    const aiHint = aiTextRaw.replace(/^"|"$/g, "");
+
+    if (!aiHint || aiHint.toUpperCase() === "UNKNOWN") {
+      return;
+    }
+
+    // ---------- STEP 2: Correct Rolimons item match (scored) ----------
+    const item = findBestItemMatch(items, userMsg, aiHint);
+    if (!item) return;
+
+    const itemId = item.id;
+    const details = item.details;
+
+    const name = details[0];
+    const acronym = details[1];
+    const rap = details[2];
+    const value = details[3];
+
+    const numericValue = Number(value) || 0;
+    if (numericValue <= MIN_ITEM_VALUE) return;
+
+    // ---------- STEP 3: 10s delay then re-check VERIFIED CACHE ----------
+    await sleep(10000);
+
+    // If they got logged during the delay, skip.
+    if (cachedVerifiedKeys.has(authorKey)) return;
+
+    // ---------- STEP 4: get thumbnail ----------
+    const thumbnailUrl = await getItemThumbnail(itemId);
+
+    // ---------- STEP 5: send webhook ----------
+    const embed = {
+      title: "High Value Item Mentioned",
+      description:
+        `**Message:** ${userMsg}\n` +
+        `**Discord:** ${message.author.tag}\n` +
+        `**Discord ID:** ${authorKey}\n` +
+        `**Jump:** ${jumpLink}\n\n` +
+        `**Item:** ${name}${acronym ? ` (${acronym})` : ""}\n` +
+        `**Value:** ${formatValue(numericValue)}\n` +
+        `**RAP:** ${formatValue(rap)}`,
+      color: 0x00a2ff,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (thumbnailUrl) {
+      embed.thumbnail = { url: thumbnailUrl };
+    }
+
+    await axios.post(WEBHOOK_URL, { embeds: [embed] });
+  } catch (err) {
+    console.error("[Monitor] Error processing message:", err?.message || err);
+  }
 });
 
-// ----------------- START -----------------
+client.on("error", (e) => console.error("Discord client error:", e));
+process.on("unhandledRejection", (e) =>
+  console.error("Unhandled promise rejection:", e)
+);
 
-client.login(TOKEN).catch((err) => {
-  console.error("Login failed:", err.message);
+process.on("SIGINT", () => {
+  console.log("Shutting down...");
+  process.exit(0);
+});
+
+client.login(TOKEN).catch((e) => {
+  console.error("Failed to login:", e);
   process.exit(1);
 });
