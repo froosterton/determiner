@@ -6,7 +6,7 @@ const axios = require("axios");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest";
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-4-5";
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 const MONITOR_CHANNEL_IDS = [
