@@ -1,11 +1,12 @@
 const { Client } = require("discord.js-selfbot-v13");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Anthropic = require("@anthropic-ai/sdk");
 const axios = require("axios");
 
 // ----------------- CONFIG -----------------
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest";
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 const MONITOR_CHANNEL_IDS = [
@@ -21,6 +22,7 @@ const ROLIMONS_API = "https://api.rolimons.com/items/v2/itemdetails";
 const MIN_ITEM_VALUE = 100000; // 100K
 
 const ALLOWED_ROLES = [
+  "Novice",
   "Verified",
   "Nitro Booster",
   "200k Members",
@@ -48,8 +50,8 @@ if (!TOKEN) {
   console.error("DISCORD_TOKEN is not set");
   process.exit(1);
 }
-if (!GEMINI_API_KEY) {
-  console.error("GEMINI_API_KEY is not set");
+if (!ANTHROPIC_API_KEY) {
+  console.error("ANTHROPIC_API_KEY is not set");
   process.exit(1);
 }
 if (!WEBHOOK_URL) {
@@ -57,10 +59,9 @@ if (!WEBHOOK_URL) {
   process.exit(1);
 }
 
-// ----------------- GEMINI SETUP -----------------
+// ----------------- CLAUDE SETUP -----------------
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // ----------------- DISCORD CLIENT -----------------
 
@@ -360,7 +361,7 @@ function findBestItemMatch(items, messageText, aiHintText) {
 
   const candidates = [];
 
-  // 1) If Gemini returned something, try:
+  // 1) If Claude returned something, try:
   //    - exact acronym token candidates
   //    - exact name key candidates
   if (hintNorm) {
@@ -475,7 +476,7 @@ client.on("messageCreate", async (message) => {
 
     const { items } = await getRolimonsData();
 
-    // ---------- STEP 1: Gemini hint (not final truth) ----------
+    // ---------- STEP 1: Claude hint (not final truth) ----------
     const prompt = `
 You will be given a Discord message from a Roblox trading server.
 
@@ -486,8 +487,12 @@ Your job:
 
 Message: ${userMsg}
 `;
-    const aiResult = await model.generateContent(prompt);
-    const aiTextRaw = aiResult.response.text().trim();
+    const aiResult = await anthropic.messages.create({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 50,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const aiTextRaw = (aiResult.content?.[0]?.text || "").trim();
     const aiHint = aiTextRaw.replace(/^"|"$/g, "");
 
     if (!aiHint || aiHint.toUpperCase() === "UNKNOWN") {
